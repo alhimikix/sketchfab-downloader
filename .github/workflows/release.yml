@@ -1,0 +1,98 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: windows-x64
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: macos-15-intel
+            target: macos-x64
+          - os: macos-15
+            target: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install Python build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python -c "import os; from app_version import VERSION; assert os.environ['RELEASE_TAG'] == 'v'+VERSION"
+      - name: Install Linux desktop/browser libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk
+          python -m playwright install-deps chromium
+      - name: Unit tests
+        run: python -m unittest discover -v
+      - name: Build native application and package
+        run: python scripts/build_release.py --target ${{ matrix.target }}
+      - name: Smoke-test packaged application (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python scripts/smoke_release.py --target ${{ matrix.target }}
+      - name: Smoke-test packaged application
+        if: runner.os != 'Linux'
+        run: python scripts/smoke_release.py --target ${{ matrix.target }}
+      - name: Upload smoke-test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-${{ matrix.target }}
+          path: |
+            smoke-${{ matrix.target }}.json
+            smoke-updater-${{ matrix.target }}.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  publish:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish all four verified packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --draft --verify-tag --title "Sketchfab Local $RELEASE_TAG" \
+            --notes-file RELEASE_NOTES.md
+          gh release edit "$RELEASE_TAG" --draft=false --latest

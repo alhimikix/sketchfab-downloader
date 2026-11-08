@@ -1,0 +1,5 @@
+pyinstaller==6.22.3
+playwright==1.64.1
+numpy==2.5.1
+Pillow==12.2.0
+certifi==2026.10.23
